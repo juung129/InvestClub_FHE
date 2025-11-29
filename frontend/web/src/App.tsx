@@ -6,680 +6,578 @@ import "./App.css";
 import { useAccount } from 'wagmi';
 import { useFhevm, useEncrypt, useDecrypt } from '../fhevm-sdk/src';
 
-interface InvestmentData {
+interface InvestmentProposal {
   id: string;
   name: string;
-  encryptedValue: string;
+  encryptedValue: any;
   publicValue1: number;
   publicValue2: number;
   description: string;
   creator: string;
   timestamp: number;
-  isVerified: boolean;
   decryptedValue: number;
+  isVerified: boolean;
+  category: string;
+  riskLevel: number;
+}
+
+interface UserHistory {
+  action: string;
+  target: string;
+  timestamp: number;
+  status: string;
 }
 
 const App: React.FC = () => {
   const { address, isConnected } = useAccount();
   const [loading, setLoading] = useState(true);
-  const [investments, setInvestments] = useState<InvestmentData[]>([]);
-  const [isRefreshing, setIsRefreshing] = useState(false);
+  const [proposals, setProposals] = useState<InvestmentProposal[]>([]);
+  const [filteredProposals, setFilteredProposals] = useState<InvestmentProposal[]>([]);
+  const [searchTerm, setSearchTerm] = useState("");
+  const [selectedCategory, setSelectedCategory] = useState("all");
   const [showCreateModal, setShowCreateModal] = useState(false);
-  const [creatingInvestment, setCreatingInvestment] = useState(false);
-  const [transactionStatus, setTransactionStatus] = useState<{ visible: boolean; status: "pending" | "success" | "error"; message: string; }>({ 
+  const [creatingProposal, setCreatingProposal] = useState(false);
+  const [transactionStatus, setTransactionStatus] = useState({ 
     visible: false, 
     status: "pending", 
     message: "" 
   });
-  const [newInvestmentData, setNewInvestmentData] = useState({ 
+  const [newProposalData, setNewProposalData] = useState({ 
     name: "", 
     amount: "", 
     description: "",
-    riskLevel: "5"
+    category: "growth",
+    riskLevel: 5
   });
-  const [selectedInvestment, setSelectedInvestment] = useState<InvestmentData | null>(null);
-  const [contractAddress, setContractAddress] = useState("");
-  const [fhevmInitializing, setFhevmInitializing] = useState(false);
-  const [searchTerm, setSearchTerm] = useState("");
-  const [currentPage, setCurrentPage] = useState(1);
-  const itemsPerPage = 6;
+  const [selectedProposal, setSelectedProposal] = useState<InvestmentProposal | null>(null);
+  const [userHistory, setUserHistory] = useState<UserHistory[]>([]);
+  const [stats, setStats] = useState({
+    totalProposals: 0,
+    totalValue: 0,
+    avgRisk: 0,
+    verifiedCount: 0
+  });
 
-  const { status, initialize, isInitialized } = useFhevm();
+  const { initialize, isInitialized } = useFhevm();
   const { encrypt, isEncrypting } = useEncrypt();
-  const { verifyDecryption, isDecrypting: fheIsDecrypting } = useDecrypt();
+  const { verifyDecryption, isDecrypting } = useDecrypt();
 
   useEffect(() => {
-    const initFhevmAfterConnection = async () => {
-      if (!isConnected || isInitialized || fhevmInitializing) return;
-      
-      try {
-        setFhevmInitializing(true);
-        await initialize();
-      } catch (error) {
-        console.error('FHEVM initialization failed:', error);
-        setTransactionStatus({ 
-          visible: true, 
-          status: "error", 
-          message: "FHEVM initialization failed" 
-        });
-        setTimeout(() => setTransactionStatus({ visible: false, status: "pending", message: "" }), 3000);
-      } finally {
-        setFhevmInitializing(false);
-      }
-    };
-
-    initFhevmAfterConnection();
-  }, [isConnected, isInitialized, initialize, fhevmInitializing]);
-
-  useEffect(() => {
-    const loadDataAndContract = async () => {
-      if (!isConnected) {
-        setLoading(false);
-        return;
-      }
-      
-      try {
-        await loadData();
-        const contract = await getContractReadOnly();
-        if (contract) setContractAddress(await contract.getAddress());
-      } catch (error) {
-        console.error('Failed to load data:', error);
-      } finally {
-        setLoading(false);
-      }
-    };
-
-    loadDataAndContract();
-  }, [isConnected]);
-
-  const loadData = async () => {
-    if (!isConnected) return;
-    
-    setIsRefreshing(true);
-    try {
-      const contract = await getContractReadOnly();
-      if (!contract) return;
-      
-      const businessIds = await contract.getAllBusinessIds();
-      const investmentsList: InvestmentData[] = [];
-      
-      for (const businessId of businessIds) {
+    const initFhevm = async () => {
+      if (isConnected && !isInitialized) {
         try {
-          const businessData = await contract.getBusinessData(businessId);
-          investmentsList.push({
-            id: businessId,
-            name: businessData.name,
-            encryptedValue: businessId,
-            publicValue1: Number(businessData.publicValue1) || 0,
-            publicValue2: Number(businessData.publicValue2) || 0,
-            description: businessData.description,
-            creator: businessData.creator,
-            timestamp: Number(businessData.timestamp),
-            isVerified: businessData.isVerified,
-            decryptedValue: Number(businessData.decryptedValue) || 0
-          });
-        } catch (e) {
-          console.error('Error loading business data:', e);
+          await initialize();
+        } catch (error) {
+          console.error('FHEVM init failed:', error);
         }
       }
-      
-      setInvestments(investmentsList);
-    } catch (e) {
-      setTransactionStatus({ visible: true, status: "error", message: "Failed to load data" });
-      setTimeout(() => setTransactionStatus({ visible: false, status: "pending", message: "" }), 3000);
-    } finally { 
-      setIsRefreshing(false); 
-    }
-  };
+    };
+    initFhevm();
+  }, [isConnected, isInitialized, initialize]);
 
-  const createInvestment = async () => {
-    if (!isConnected || !address) { 
-      setTransactionStatus({ visible: true, status: "error", message: "Please connect wallet first" });
-      setTimeout(() => setTransactionStatus({ visible: false, status: "pending", message: "" }), 3000);
-      return; 
+  useEffect(() => {
+    if (isConnected) {
+      loadProposals();
+    } else {
+      setLoading(false);
     }
-    
-    setCreatingInvestment(true);
-    setTransactionStatus({ visible: true, status: "pending", message: "Creating investment with FHE encryption..." });
-    
-    try {
-      const contract = await getContractWithSigner();
-      if (!contract) throw new Error("Failed to get contract with signer");
-      
-      const amountValue = parseInt(newInvestmentData.amount) || 0;
-      const businessId = `investment-${Date.now()}`;
-      
-      const encryptedResult = await encrypt(contractAddress, address, amountValue);
-      
-      const tx = await contract.createBusinessData(
-        businessId,
-        newInvestmentData.name,
-        encryptedResult.encryptedData,
-        encryptedResult.proof,
-        parseInt(newInvestmentData.riskLevel) || 5,
-        0,
-        newInvestmentData.description
-      );
-      
-      setTransactionStatus({ visible: true, status: "pending", message: "Waiting for transaction confirmation..." });
-      await tx.wait();
-      
-      setTransactionStatus({ visible: true, status: "success", message: "Investment created successfully!" });
-      setTimeout(() => {
-        setTransactionStatus({ visible: false, status: "pending", message: "" });
-      }, 2000);
-      
-      await loadData();
-      setShowCreateModal(false);
-      setNewInvestmentData({ name: "", amount: "", description: "", riskLevel: "5" });
-    } catch (e: any) {
-      const errorMessage = e.message?.includes("user rejected transaction") 
-        ? "Transaction rejected by user" 
-        : "Submission failed: " + (e.message || "Unknown error");
-      setTransactionStatus({ visible: true, status: "error", message: errorMessage });
-      setTimeout(() => setTransactionStatus({ visible: false, status: "pending", message: "" }), 3000);
-    } finally { 
-      setCreatingInvestment(false); 
-    }
-  };
+  }, [isConnected]);
 
-  const decryptData = async (businessId: string): Promise<number | null> => {
-    if (!isConnected || !address) { 
-      setTransactionStatus({ visible: true, status: "error", message: "Please connect wallet first" });
-      setTimeout(() => setTransactionStatus({ visible: false, status: "pending", message: "" }), 3000);
-      return null; 
-    }
-    
-    try {
-      const contractRead = await getContractReadOnly();
-      if (!contractRead) return null;
-      
-      const businessData = await contractRead.getBusinessData(businessId);
-      if (businessData.isVerified) {
-        const storedValue = Number(businessData.decryptedValue) || 0;
-        setTransactionStatus({ visible: true, status: "success", message: "Data already verified on-chain" });
-        setTimeout(() => setTransactionStatus({ visible: false, status: "pending", message: "" }), 2000);
-        return storedValue;
-      }
-      
-      const contractWrite = await getContractWithSigner();
-      if (!contractWrite) return null;
-      
-      const encryptedValueHandle = await contractRead.getEncryptedValue(businessId);
-      
-      const result = await verifyDecryption(
-        [encryptedValueHandle],
-        contractAddress,
-        (abiEncodedClearValues: string, decryptionProof: string) => 
-          contractWrite.verifyDecryption(businessId, abiEncodedClearValues, decryptionProof)
-      );
-      
-      setTransactionStatus({ visible: true, status: "pending", message: "Verifying decryption on-chain..." });
-      
-      const clearValue = result.decryptionResult.clearValues[encryptedValueHandle];
-      
-      await loadData();
-      
-      setTransactionStatus({ visible: true, status: "success", message: "Data decrypted and verified successfully!" });
-      setTimeout(() => setTransactionStatus({ visible: false, status: "pending", message: "" }), 2000);
-      
-      return Number(clearValue);
-      
-    } catch (e: any) { 
-      if (e.message?.includes("Data already verified")) {
-        setTransactionStatus({ visible: true, status: "success", message: "Data is already verified on-chain" });
-        setTimeout(() => setTransactionStatus({ visible: false, status: "pending", message: "" }), 2000);
-        await loadData();
-        return null;
-      }
-      
-      setTransactionStatus({ visible: true, status: "error", message: "Decryption failed: " + (e.message || "Unknown error") });
-      setTimeout(() => setTransactionStatus({ visible: false, status: "pending", message: "" }), 3000);
-      return null; 
-    }
-  };
+  useEffect(() => {
+    filterProposals();
+    calculateStats();
+  }, [proposals, searchTerm, selectedCategory]);
 
-  const checkAvailability = async () => {
+  const loadProposals = async () => {
+    setLoading(true);
     try {
       const contract = await getContractReadOnly();
       if (!contract) return;
+
+      const businessIds = await contract.getAllBusinessIds();
+      const proposalsList: InvestmentProposal[] = [];
+
+      for (const id of businessIds) {
+        try {
+          const data = await contract.getBusinessData(id);
+          proposalsList.push({
+            id,
+            name: data.name,
+            encryptedValue: null,
+            publicValue1: Number(data.publicValue1),
+            publicValue2: Number(data.publicValue2),
+            description: data.description,
+            creator: data.creator,
+            timestamp: Number(data.timestamp),
+            decryptedValue: Number(data.decryptedValue),
+            isVerified: data.isVerified,
+            category: Number(data.publicValue2) > 7 ? "high-risk" : "growth",
+            riskLevel: Number(data.publicValue1)
+          });
+        } catch (e) {
+          console.error('Error loading proposal:', e);
+        }
+      }
+
+      setProposals(proposalsList);
+      addUserHistory("LOAD", "All proposals", "success");
+    } catch (error) {
+      setTransactionStatus({ visible: true, status: "error", message: "Load failed" });
+      setTimeout(() => setTransactionStatus({ visible: false, status: "pending", message: "" }), 3000);
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  const filterProposals = () => {
+    let filtered = proposals.filter(proposal => 
+      proposal.name.toLowerCase().includes(searchTerm.toLowerCase()) ||
+      proposal.description.toLowerCase().includes(searchTerm.toLowerCase())
+    );
+
+    if (selectedCategory !== "all") {
+      filtered = filtered.filter(proposal => proposal.category === selectedCategory);
+    }
+
+    setFilteredProposals(filtered);
+  };
+
+  const calculateStats = () => {
+    const totalProposals = proposals.length;
+    const totalValue = proposals.reduce((sum, p) => sum + (p.isVerified ? p.decryptedValue : 0), 0);
+    const avgRisk = proposals.length > 0 ? proposals.reduce((sum, p) => sum + p.riskLevel, 0) / proposals.length : 0;
+    const verifiedCount = proposals.filter(p => p.isVerified).length;
+
+    setStats({ totalProposals, totalValue, avgRisk, verifiedCount });
+  };
+
+  const addUserHistory = (action: string, target: string, status: string) => {
+    const history: UserHistory = {
+      action,
+      target,
+      timestamp: Date.now(),
+      status
+    };
+    setUserHistory(prev => [history, ...prev.slice(0, 9)]);
+  };
+
+  const createProposal = async () => {
+    if (!isConnected || !address) {
+      setTransactionStatus({ visible: true, status: "error", message: "Connect wallet first" });
+      return;
+    }
+
+    setCreatingProposal(true);
+    setTransactionStatus({ visible: true, status: "pending", message: "Encrypting proposal..." });
+
+    try {
+      const contract = await getContractWithSigner();
+      if (!contract) throw new Error("No contract");
+
+      const amountValue = parseInt(newProposalData.amount) || 0;
+      const businessId = `proposal-${Date.now()}`;
       
-      const isAvailable = await contract.isAvailable();
-      setTransactionStatus({ visible: true, status: "success", message: "Contract is available and ready!" });
-      setTimeout(() => setTransactionStatus({ visible: false, status: "pending", message: "" }), 2000);
-    } catch (e) {
-      setTransactionStatus({ visible: true, status: "error", message: "Availability check failed" });
+      const encryptedResult = await encrypt(await contract.getAddress(), address, amountValue);
+
+      const tx = await contract.createBusinessData(
+        businessId,
+        newProposalData.name,
+        encryptedResult.encryptedData,
+        encryptedResult.proof,
+        newProposalData.riskLevel,
+        0,
+        newProposalData.description
+      );
+
+      setTransactionStatus({ visible: true, status: "pending", message: "Confirming..." });
+      await tx.wait();
+
+      addUserHistory("CREATE", newProposalData.name, "success");
+      setTransactionStatus({ visible: true, status: "success", message: "Proposal created!" });
+      
+      await loadProposals();
+      setShowCreateModal(false);
+      setNewProposalData({ name: "", amount: "", description: "", category: "growth", riskLevel: 5 });
+    } catch (error: any) {
+      addUserHistory("CREATE", newProposalData.name, "failed");
+      setTransactionStatus({ visible: true, status: "error", message: "Creation failed" });
+    } finally {
+      setCreatingProposal(false);
       setTimeout(() => setTransactionStatus({ visible: false, status: "pending", message: "" }), 3000);
     }
   };
 
-  const filteredInvestments = investments.filter(investment =>
-    investment.name.toLowerCase().includes(searchTerm.toLowerCase()) ||
-    investment.description.toLowerCase().includes(searchTerm.toLowerCase())
+  const decryptProposal = async (proposalId: string) => {
+    if (!isConnected) return null;
+
+    try {
+      const contractRead = await getContractReadOnly();
+      const contractWrite = await getContractWithSigner();
+      if (!contractRead || !contractWrite) return null;
+
+      const proposalData = await contractRead.getBusinessData(proposalId);
+      if (proposalData.isVerified) {
+        return Number(proposalData.decryptedValue);
+      }
+
+      const encryptedValue = await contractRead.getEncryptedValue(proposalId);
+      
+      const result = await verifyDecryption(
+        [encryptedValue],
+        await contractRead.getAddress(),
+        (abiEncodedClearValues: string, decryptionProof: string) => 
+          contractWrite.verifyDecryption(proposalId, abiEncodedClearValues, decryptionProof)
+      );
+
+      const clearValue = result.decryptionResult.clearValues[encryptedValue];
+      addUserHistory("DECRYPT", proposalId, "success");
+      return Number(clearValue);
+    } catch (error) {
+      addUserHistory("DECRYPT", proposalId, "failed");
+      return null;
+    }
+  };
+
+  const handleAvailableCheck = async () => {
+    try {
+      const contract = await getContractReadOnly();
+      if (contract) {
+        await contract.isAvailable();
+        setTransactionStatus({ visible: true, status: "success", message: "System available" });
+        addUserHistory("CHECK", "System", "success");
+      }
+    } catch (error) {
+      setTransactionStatus({ visible: true, status: "error", message: "Check failed" });
+    } finally {
+      setTimeout(() => setTransactionStatus({ visible: false, status: "pending", message: "" }), 2000);
+    }
+  };
+
+  const renderStatsPanel = () => (
+    <div className="stats-panel">
+      <div className="stat-card neon-purple">
+        <h3>Total Proposals</h3>
+        <div className="stat-value">{stats.totalProposals}</div>
+        <div className="stat-trend">FHE Protected</div>
+      </div>
+      <div className="stat-card neon-blue">
+        <h3>Total Value</h3>
+        <div className="stat-value">${stats.totalValue}K</div>
+        <div className="stat-trend">Encrypted Assets</div>
+      </div>
+      <div className="stat-card neon-pink">
+        <h3>Avg Risk</h3>
+        <div className="stat-value">{stats.avgRisk.toFixed(1)}/10</div>
+        <div className="stat-trend">Risk Level</div>
+      </div>
+      <div className="stat-card neon-green">
+        <h3>Verified</h3>
+        <div className="stat-value">{stats.verifiedCount}</div>
+        <div className="stat-trend">On-chain</div>
+      </div>
+    </div>
   );
 
-  const paginatedInvestments = filteredInvestments.slice(
-    (currentPage - 1) * itemsPerPage,
-    currentPage * itemsPerPage
+  const renderRiskChart = (proposal: InvestmentProposal) => (
+    <div className="risk-chart">
+      <div className="chart-header">
+        <h4>Risk Analysis</h4>
+        <span className={`risk-badge risk-${proposal.riskLevel}`}>Level {proposal.riskLevel}</span>
+      </div>
+      <div className="chart-bars">
+        <div className="chart-bar">
+          <div className="bar-label">Market Risk</div>
+          <div className="bar-container">
+            <div 
+              className="bar-fill" 
+              style={{ width: `${Math.min(100, proposal.riskLevel * 10)}%` }}
+            ></div>
+          </div>
+        </div>
+        <div className="chart-bar">
+          <div className="bar-label">Liquidity</div>
+          <div className="bar-container">
+            <div 
+              className="bar-fill" 
+              style={{ width: `${Math.min(100, (10 - proposal.riskLevel) * 10)}%` }}
+            ></div>
+          </div>
+        </div>
+        <div className="chart-bar">
+          <div className="bar-label">Potential Return</div>
+          <div className="bar-container">
+            <div 
+              className="bar-fill return" 
+              style={{ width: `${Math.min(100, proposal.publicValue1 * 8)}%` }}
+            ></div>
+          </div>
+        </div>
+      </div>
+    </div>
   );
-
-  const totalPages = Math.ceil(filteredInvestments.length / itemsPerPage);
 
   if (!isConnected) {
     return (
       <div className="app-container">
-        <header className="app-header">
+        <header className="app-header metal-header">
           <div className="logo">
-            <h1>Confidential Investment Club 🔐</h1>
+            <h1 className="neon-text">Confidential Investment Club</h1>
+            <span className="tagline">FHE Protected Alpha</span>
           </div>
-          <div className="header-actions">
-            <ConnectButton accountStatus="address" chainStatus="icon" showBalance={false}/>
-          </div>
+          <ConnectButton />
         </header>
-        
         <div className="connection-prompt">
-          <div className="connection-content">
-            <div className="connection-icon">💎</div>
-            <h2>Welcome to Confidential Investment Club</h2>
-            <p>Connect your wallet to access encrypted investment strategies and protected alpha opportunities.</p>
-            <div className="connection-steps">
-              <div className="step">
-                <span>1</span>
-                <p>Connect wallet to initialize FHE system</p>
-              </div>
-              <div className="step">
-                <span>2</span>
-                <p>Create encrypted investment proposals</p>
-              </div>
-              <div className="step">
-                <span>3</span>
-                <p>Collaborate securely with club members</p>
-              </div>
-            </div>
+          <div className="prompt-content">
+            <div className="neon-glow">🔐</div>
+            <h2>Connect to Encrypted Club</h2>
+            <p>Join the private investment community with fully homomorphic encryption</p>
           </div>
         </div>
       </div>
     );
   }
 
-  if (!isInitialized || fhevmInitializing) {
+  if (loading) {
     return (
       <div className="loading-screen">
-        <div className="fhe-spinner"></div>
-        <p>Initializing FHE Encryption System...</p>
-        <p className="loading-note">Securing your investment strategies</p>
+        <div className="neon-spinner"></div>
+        <p>Initializing FHE Security...</p>
       </div>
     );
   }
-
-  if (loading) return (
-    <div className="loading-screen">
-      <div className="fhe-spinner"></div>
-      <p>Loading confidential investment data...</p>
-    </div>
-  );
 
   return (
     <div className="app-container">
-      <header className="app-header">
+      <header className="app-header metal-header">
         <div className="logo">
-          <h1>Confidential Investment Club 💎</h1>
-          <p>FHE-Protected Alpha Strategies</p>
+          <h1 className="neon-text">Confidential Investment Club</h1>
+          <span className="tagline">FHE Protected Alpha Strategies</span>
         </div>
-        
         <div className="header-actions">
-          <button onClick={checkAvailability} className="status-btn">
-            Check Status
+          <button className="neon-btn" onClick={handleAvailableCheck}>
+            Check System
           </button>
-          <button onClick={() => setShowCreateModal(true)} className="create-btn">
-            + New Proposal
-          </button>
-          <ConnectButton accountStatus="address" chainStatus="icon" showBalance={false}/>
+          <ConnectButton />
         </div>
       </header>
-      
-      <div className="main-content">
-        <div className="stats-panel">
-          <div className="stat-card">
-            <h3>Total Proposals</h3>
-            <div className="stat-value">{investments.length}</div>
-          </div>
-          <div className="stat-card">
-            <h3>Verified Data</h3>
-            <div className="stat-value">{investments.filter(i => i.isVerified).length}</div>
-          </div>
-          <div className="stat-card">
-            <h3>Active Members</h3>
-            <div className="stat-value">{new Set(investments.map(i => i.creator)).size}</div>
-          </div>
-        </div>
 
-        <div className="search-section">
-          <input
-            type="text"
-            placeholder="Search investments..."
-            value={searchTerm}
-            onChange={(e) => setSearchTerm(e.target.value)}
-            className="search-input"
-          />
-          <button onClick={loadData} className="refresh-btn" disabled={isRefreshing}>
-            {isRefreshing ? "Refreshing..." : "Refresh"}
-          </button>
-        </div>
-
-        <div className="investments-grid">
-          {paginatedInvestments.map((investment, index) => (
-            <div 
-              key={index}
-              className={`investment-card ${investment.isVerified ? 'verified' : ''}`}
-              onClick={() => setSelectedInvestment(investment)}
-            >
-              <div className="card-header">
-                <h3>{investment.name}</h3>
-                <span className={`status-badge ${investment.isVerified ? 'verified' : 'pending'}`}>
-                  {investment.isVerified ? '✅ Verified' : '🔒 Encrypted'}
-                </span>
-              </div>
-              <p className="description">{investment.description}</p>
-              <div className="card-details">
-                <div className="detail-item">
-                  <span>Risk Level:</span>
-                  <span>{investment.publicValue1}/10</span>
+      <div className="main-layout">
+        <div className="left-panel">
+          {renderStatsPanel()}
+          
+          <div className="history-panel metal-panel">
+            <h3>Recent Activity</h3>
+            <div className="history-list">
+              {userHistory.map((item, index) => (
+                <div key={index} className="history-item">
+                  <span className={`status-${item.status}`}>{item.action}</span>
+                  <span className="target">{item.target}</span>
+                  <span className="time">{new Date(item.timestamp).toLocaleTimeString()}</span>
                 </div>
-                <div className="detail-item">
-                  <span>Created:</span>
-                  <span>{new Date(investment.timestamp * 1000).toLocaleDateString()}</span>
-                </div>
-              </div>
-              <div className="card-footer">
-                <span className="creator">By: {investment.creator.substring(0, 6)}...{investment.creator.substring(38)}</span>
-                {investment.isVerified && (
-                  <span className="amount">Amount: {investment.decryptedValue}</span>
-                )}
-              </div>
+              ))}
             </div>
-          ))}
+          </div>
         </div>
 
-        {totalPages > 1 && (
-          <div className="pagination">
+        <div className="main-panel">
+          <div className="panel-header">
+            <div className="search-section">
+              <input
+                type="text"
+                placeholder="Search proposals..."
+                value={searchTerm}
+                onChange={(e) => setSearchTerm(e.target.value)}
+                className="neon-input"
+              />
+              <select 
+                value={selectedCategory} 
+                onChange={(e) => setSelectedCategory(e.target.value)}
+                className="neon-select"
+              >
+                <option value="all">All Categories</option>
+                <option value="growth">Growth</option>
+                <option value="high-risk">High Risk</option>
+              </select>
+            </div>
             <button 
-              onClick={() => setCurrentPage(p => Math.max(1, p - 1))}
-              disabled={currentPage === 1}
+              onClick={() => setShowCreateModal(true)}
+              className="neon-btn create-btn"
             >
-              Previous
-            </button>
-            <span>Page {currentPage} of {totalPages}</span>
-            <button 
-              onClick={() => setCurrentPage(p => Math.min(totalPages, p + 1))}
-              disabled={currentPage === totalPages}
-            >
-              Next
+              + New Proposal
             </button>
           </div>
-        )}
 
-        {investments.length === 0 && (
-          <div className="empty-state">
-            <div className="empty-icon">💎</div>
-            <h3>No Investment Proposals Yet</h3>
-            <p>Be the first to create an encrypted investment proposal</p>
-            <button onClick={() => setShowCreateModal(true)} className="create-btn">
-              Create First Proposal
-            </button>
-          </div>
-        )}
-      </div>
-      
-      {showCreateModal && (
-        <CreateInvestmentModal 
-          onSubmit={createInvestment} 
-          onClose={() => setShowCreateModal(false)} 
-          creating={creatingInvestment} 
-          investmentData={newInvestmentData} 
-          setInvestmentData={setNewInvestmentData}
-          isEncrypting={isEncrypting}
-        />
-      )}
-      
-      {selectedInvestment && (
-        <InvestmentDetailModal 
-          investment={selectedInvestment}
-          onClose={() => setSelectedInvestment(null)}
-          decryptData={decryptData}
-          isDecrypting={fheIsDecrypting}
-        />
-      )}
-      
-      {transactionStatus.visible && (
-        <div className="transaction-toast">
-          <div className={`toast-content ${transactionStatus.status}`}>
-            <div className="toast-icon">
-              {transactionStatus.status === "pending" && <div className="spinner"></div>}
-              {transactionStatus.status === "success" && "✓"}
-              {transactionStatus.status === "error" && "✗"}
-            </div>
-            <div className="toast-message">{transactionStatus.message}</div>
-          </div>
-        </div>
-      )}
-
-      <footer className="app-footer">
-        <div className="footer-content">
-          <p>Confidential Investment Club - FHE Protected Alpha Strategies</p>
-          <div className="footer-links">
-            <span>Privacy First</span>
-            <span>Encrypted Collaboration</span>
-            <span>Alpha Protection</span>
-          </div>
-        </div>
-      </footer>
-    </div>
-  );
-};
-
-const CreateInvestmentModal: React.FC<{
-  onSubmit: () => void; 
-  onClose: () => void; 
-  creating: boolean;
-  investmentData: any;
-  setInvestmentData: (data: any) => void;
-  isEncrypting: boolean;
-}> = ({ onSubmit, onClose, creating, investmentData, setInvestmentData, isEncrypting }) => {
-  const handleChange = (e: React.ChangeEvent<HTMLInputElement | HTMLTextAreaElement>) => {
-    const { name, value } = e.target;
-    if (name === 'amount') {
-      const intValue = value.replace(/[^\d]/g, '');
-      setInvestmentData({ ...investmentData, [name]: intValue });
-    } else {
-      setInvestmentData({ ...investmentData, [name]: value });
-    }
-  };
-
-  return (
-    <div className="modal-overlay">
-      <div className="modal">
-        <div className="modal-header">
-          <h2>Create Encrypted Investment Proposal</h2>
-          <button onClick={onClose} className="close-btn">&times;</button>
-        </div>
-        
-        <div className="modal-body">
-          <div className="fhe-notice">
-            <strong>FHE Encryption Active</strong>
-            <p>Investment amount will be encrypted using Zama FHE technology</p>
-          </div>
-          
-          <div className="form-group">
-            <label>Proposal Name *</label>
-            <input 
-              type="text" 
-              name="name" 
-              value={investmentData.name} 
-              onChange={handleChange} 
-              placeholder="Enter proposal name..." 
-            />
-          </div>
-          
-          <div className="form-group">
-            <label>Investment Amount (Encrypted) *</label>
-            <input 
-              type="number" 
-              name="amount" 
-              value={investmentData.amount} 
-              onChange={handleChange} 
-              placeholder="Enter amount..." 
-              step="1"
-              min="0"
-            />
-            <div className="input-hint">FHE Encrypted Integer</div>
-          </div>
-          
-          <div className="form-group">
-            <label>Risk Level (1-10) *</label>
-            <input 
-              type="range" 
-              min="1" 
-              max="10" 
-              name="riskLevel" 
-              value={investmentData.riskLevel} 
-              onChange={handleChange} 
-            />
-            <div className="risk-display">Risk: {investmentData.riskLevel}/10</div>
-          </div>
-          
-          <div className="form-group">
-            <label>Description *</label>
-            <textarea 
-              name="description" 
-              value={investmentData.description} 
-              onChange={handleChange} 
-              placeholder="Describe your investment strategy..."
-              rows={3}
-            />
-          </div>
-        </div>
-        
-        <div className="modal-footer">
-          <button onClick={onClose} className="secondary-btn">Cancel</button>
-          <button 
-            onClick={onSubmit} 
-            disabled={creating || isEncrypting || !investmentData.name || !investmentData.amount || !investmentData.description} 
-            className="primary-btn"
-          >
-            {creating || isEncrypting ? "Encrypting..." : "Create Proposal"}
-          </button>
-        </div>
-      </div>
-    </div>
-  );
-};
-
-const InvestmentDetailModal: React.FC<{
-  investment: InvestmentData;
-  onClose: () => void;
-  decryptData: (id: string) => Promise<number | null>;
-  isDecrypting: boolean;
-}> = ({ investment, onClose, decryptData, isDecrypting }) => {
-  const [decryptedAmount, setDecryptedAmount] = useState<number | null>(null);
-
-  const handleDecrypt = async () => {
-    if (investment.isVerified) {
-      setDecryptedAmount(investment.decryptedValue);
-      return;
-    }
-    
-    const amount = await decryptData(investment.id);
-    if (amount !== null) {
-      setDecryptedAmount(amount);
-    }
-  };
-
-  return (
-    <div className="modal-overlay">
-      <div className="modal large">
-        <div className="modal-header">
-          <h2>Investment Proposal Details</h2>
-          <button onClick={onClose} className="close-btn">&times;</button>
-        </div>
-        
-        <div className="modal-body">
-          <div className="investment-info">
-            <div className="info-grid">
-              <div className="info-item">
-                <label>Proposal Name:</label>
-                <span>{investment.name}</span>
-              </div>
-              <div className="info-item">
-                <label>Creator:</label>
-                <span>{investment.creator}</span>
-              </div>
-              <div className="info-item">
-                <label>Created:</label>
-                <span>{new Date(investment.timestamp * 1000).toLocaleString()}</span>
-              </div>
-              <div className="info-item">
-                <label>Risk Level:</label>
-                <span>{investment.publicValue1}/10</span>
-              </div>
-            </div>
-            
-            <div className="description-section">
-              <label>Strategy Description:</label>
-              <p>{investment.description}</p>
-            </div>
-            
-            <div className="encryption-section">
-              <h3>FHE Protection Status</h3>
-              <div className="encryption-status">
-                <div className={`status-item ${investment.isVerified ? 'verified' : 'encrypted'}`}>
-                  <span className="status-icon">
-                    {investment.isVerified ? '✅' : '🔒'}
-                  </span>
-                  <span className="status-text">
-                    {investment.isVerified ? 'On-chain Verified' : 'FHE Encrypted'}
+          <div className="proposals-grid">
+            {filteredProposals.map((proposal) => (
+              <div 
+                key={proposal.id}
+                className="proposal-card metal-card"
+                onClick={() => setSelectedProposal(proposal)}
+              >
+                <div className="card-header">
+                  <h3>{proposal.name}</h3>
+                  <span className={`category-tag ${proposal.category}`}>
+                    {proposal.category}
                   </span>
                 </div>
-                
-                <div className="amount-display">
-                  <label>Investment Amount:</label>
-                  <div className="amount-value">
-                    {investment.isVerified ? 
-                      `${investment.decryptedValue} (Verified)` :
-                      decryptedAmount !== null ?
-                      `${decryptedAmount} (Decrypted)` :
-                      '🔒 Encrypted'
-                    }
+                <div className="card-content">
+                  <p>{proposal.description}</p>
+                  <div className="proposal-meta">
+                    <span>Risk: {proposal.riskLevel}/10</span>
+                    <span>{new Date(proposal.timestamp * 1000).toLocaleDateString()}</span>
                   </div>
                 </div>
-                
-                <button 
-                  onClick={handleDecrypt}
-                  disabled={isDecrypting}
-                  className={`decrypt-btn ${investment.isVerified || decryptedAmount !== null ? 'decrypted' : ''}`}
-                >
-                  {isDecrypting ? 'Decrypting...' : 
-                   investment.isVerified ? '✅ Verified' :
-                   decryptedAmount !== null ? '🔄 Re-verify' : '🔓 Decrypt'}
-                </button>
+                <div className="card-footer">
+                  <div className={`status ${proposal.isVerified ? 'verified' : 'encrypted'}`}>
+                    {proposal.isVerified ? '✅ Verified' : '🔒 Encrypted'}
+                  </div>
+                  <button 
+                    className="neon-btn small"
+                    onClick={async (e) => {
+                      e.stopPropagation();
+                      const value = await decryptProposal(proposal.id);
+                      if (value !== null) {
+                        setProposals(prev => prev.map(p => 
+                          p.id === proposal.id ? { ...p, decryptedValue: value, isVerified: true } : p
+                        ));
+                      }
+                    }}
+                  >
+                    {proposal.isVerified ? 'View' : 'Decrypt'}
+                  </button>
+                </div>
               </div>
+            ))}
+          </div>
+        </div>
+      </div>
+
+      {showCreateModal && (
+        <div className="modal-overlay">
+          <div className="create-modal metal-modal">
+            <div className="modal-header">
+              <h2>New Investment Proposal</h2>
+              <button onClick={() => setShowCreateModal(false)} className="close-btn">&times;</button>
+            </div>
+            <div className="modal-body">
+              <div className="form-group">
+                <label>Proposal Name</label>
+                <input
+                  type="text"
+                  value={newProposalData.name}
+                  onChange={(e) => setNewProposalData({...newProposalData, name: e.target.value})}
+                  className="neon-input"
+                />
+              </div>
+              <div className="form-group">
+                <label>Investment Amount ($K)</label>
+                <input
+                  type="number"
+                  value={newProposalData.amount}
+                  onChange={(e) => setNewProposalData({...newProposalData, amount: e.target.value})}
+                  className="neon-input"
+                />
+                <span className="input-note">FHE Encrypted Integer</span>
+              </div>
+              <div className="form-group">
+                <label>Risk Level (1-10)</label>
+                <input
+                  type="range"
+                  min="1"
+                  max="10"
+                  value={newProposalData.riskLevel}
+                  onChange={(e) => setNewProposalData({...newProposalData, riskLevel: parseInt(e.target.value)})}
+                  className="neon-slider"
+                />
+                <span className="risk-value">{newProposalData.riskLevel}</span>
+              </div>
+              <div className="form-group">
+                <label>Description</label>
+                <textarea
+                  value={newProposalData.description}
+                  onChange={(e) => setNewProposalData({...newProposalData, description: e.target.value})}
+                  className="neon-textarea"
+                />
+              </div>
+            </div>
+            <div className="modal-footer">
+              <button onClick={() => setShowCreateModal(false)} className="neon-btn secondary">
+                Cancel
+              </button>
+              <button 
+                onClick={createProposal}
+                disabled={creatingProposal || isEncrypting}
+                className="neon-btn primary"
+              >
+                {creatingProposal ? 'Encrypting...' : 'Create Proposal'}
+              </button>
             </div>
           </div>
         </div>
-        
-        <div className="modal-footer">
-          <button onClick={onClose} className="secondary-btn">Close</button>
-          {!investment.isVerified && (
-            <button 
-              onClick={handleDecrypt}
-              disabled={isDecrypting}
-              className="primary-btn"
-            >
-              {isDecrypting ? 'Verifying...' : 'Verify on-chain'}
-            </button>
-          )}
+      )}
+
+      {selectedProposal && (
+        <div className="modal-overlay">
+          <div className="detail-modal metal-modal">
+            <div className="modal-header">
+              <h2>{selectedProposal.name}</h2>
+              <button onClick={() => setSelectedProposal(null)} className="close-btn">&times;</button>
+            </div>
+            <div className="modal-body">
+              <div className="proposal-details">
+                <div className="detail-section">
+                  <h4>Description</h4>
+                  <p>{selectedProposal.description}</p>
+                </div>
+                <div className="detail-section">
+                  <h4>Investment Details</h4>
+                  <div className="detail-grid">
+                    <div className="detail-item">
+                      <span>Amount:</span>
+                      <strong>
+                        {selectedProposal.isVerified ? 
+                          `$${selectedProposal.decryptedValue}K` : 
+                          '🔒 Encrypted'
+                        }
+                      </strong>
+                    </div>
+                    <div className="detail-item">
+                      <span>Risk Level:</span>
+                      <strong>{selectedProposal.riskLevel}/10</strong>
+                    </div>
+                    <div className="detail-item">
+                      <span>Created:</span>
+                      <strong>{new Date(selectedProposal.timestamp * 1000).toLocaleDateString()}</strong>
+                    </div>
+                    <div className="detail-item">
+                      <span>Creator:</span>
+                      <strong>{selectedProposal.creator.slice(0, 8)}...{selectedProposal.creator.slice(-6)}</strong>
+                    </div>
+                  </div>
+                </div>
+                {renderRiskChart(selectedProposal)}
+              </div>
+            </div>
+            <div className="modal-footer">
+              <button onClick={() => setSelectedProposal(null)} className="neon-btn">
+                Close
+              </button>
+            </div>
+          </div>
         </div>
-      </div>
+      )}
+
+      {transactionStatus.visible && (
+        <div className={`transaction-toast ${transactionStatus.status}`}>
+          <div className="toast-content">
+            <span className="toast-icon">
+              {transactionStatus.status === 'success' ? '✓' : 
+               transactionStatus.status === 'error' ? '✗' : '⏳'}
+            </span>
+            {transactionStatus.message}
+          </div>
+        </div>
+      )}
     </div>
   );
 };
